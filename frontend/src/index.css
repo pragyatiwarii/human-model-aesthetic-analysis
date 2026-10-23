@@ -741,3 +741,263 @@ footer strong {
     flex-direction: column;
   }
 }
+
+/* Module 2 additions */
+.modulePills {
+  display: flex;
+  gap: 7px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.activeModule {
+  border-color: rgba(182, 165, 255, 0.45);
+  background: rgba(182, 165, 255, 0.12);
+  color: #e7e0ff;
+}
+
+.module2Section {
+  margin-top: 22px;
+  padding-top: 22px;
+  border-top: 1px solid var(--line);
+}
+
+.module2Intro {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+  align-items: flex-end;
+  padding: 18px 2px 20px;
+}
+
+.module2Intro h2 {
+  margin: 7px 0 8px;
+  font-size: clamp(27px, 3vw, 42px);
+  letter-spacing: -0.04em;
+}
+
+.module2Intro p {
+  max-width: 780px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.module2Intro > svg {
+  flex: 0 0 auto;
+  color: var(--violet);
+}
+
+.module2Grid {
+  display: grid;
+  grid-template-columns: 1.05fr 0.95fr;
+  gap: 18px;
+}
+
+.controlPanel,
+.methodologyPanel,
+.module3Handoff {
+  padding: 18px;
+}
+
+.controlFacts {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr;
+  gap: 10px;
+  margin: 16px 0;
+}
+
+.controlFacts > div,
+.variantMeta > div {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(7, 17, 31, 0.38);
+  padding: 12px;
+}
+
+.controlFacts span,
+.variantMeta span,
+.fieldLabel {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+}
+
+.controlFacts strong,
+.controlFacts code {
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.perturbationSelect {
+  width: 100%;
+  height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  padding: 0 12px;
+  color: #eaf4ff;
+  background: #0a1728;
+  outline: none;
+}
+
+.specBox {
+  margin-top: 12px;
+  border: 1px solid rgba(182, 165, 255, 0.22);
+  border-radius: 13px;
+  padding: 13px;
+  background: rgba(182, 165, 255, 0.055);
+}
+
+.specBox > strong {
+  font-size: 12px;
+}
+
+.specBox > p,
+.methodNote {
+  color: #9eb3cc;
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.severitySpec {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.severitySpec span {
+  padding: 8px;
+  border-radius: 9px;
+  background: rgba(7, 17, 31, 0.55);
+  color: #b9cbe0;
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.severitySpec b {
+  display: block;
+  color: #e6effa;
+  text-transform: capitalize;
+}
+
+.generateButton {
+  width: 100%;
+  margin-top: 14px;
+  justify-content: center;
+}
+
+.methodFlow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin: 20px 0 14px;
+}
+
+.methodFlow span {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 8px 10px;
+  background: rgba(103, 232, 249, 0.055);
+  color: #c5eaf0;
+  font-size: 10px;
+}
+
+.methodFlow b {
+  color: var(--violet);
+}
+
+.variantGrid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  margin-top: 18px;
+}
+
+.variantCard {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(13, 27, 46, 0.92);
+}
+
+.variantHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 13px;
+}
+
+.variantHeader span {
+  display: block;
+  color: var(--muted);
+  font-size: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.variantHeader strong {
+  display: block;
+  margin-top: 2px;
+  font-size: 13px;
+  text-transform: capitalize;
+}
+
+.variantHeader svg {
+  color: #86efac;
+}
+
+.variantCard > img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: contain;
+  background: #030914;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.variantMeta {
+  display: grid;
+  gap: 7px;
+  padding: 10px;
+}
+
+.variantMeta code,
+.variantMeta strong {
+  color: #e3eef9;
+  font-size: 9px;
+  word-break: break-word;
+}
+
+.module3Handoff {
+  margin-top: 18px;
+}
+
+.module3Handoff pre {
+  max-height: 320px;
+}
+
+@media (max-width: 1000px) {
+  .module2Grid,
+  .variantGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .module2Intro {
+    align-items: flex-start;
+  }
+
+  .controlFacts,
+  .severitySpec {
+    grid-template-columns: 1fr;
+  }
+}

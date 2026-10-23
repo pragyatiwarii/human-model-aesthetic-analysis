@@ -48,6 +48,31 @@ export async function runModule1(imageName) {
   );
 }
 
+export async function getPerturbations() {
+  return readJson(
+    await fetch(`${API_BASE}/api/v1/perturbations`)
+  );
+}
+
+export async function generateCounterfactuals({
+  imageId,
+  regionId,
+  perturbationType,
+}) {
+  return readJson(
+    await fetch(`${API_BASE}/api/v1/counterfactuals/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        image_id: imageId,
+        region_id: regionId,
+        perturbation_type: perturbationType,
+        severities: ["subtle", "moderate", "strong"],
+      }),
+    })
+  );
+}
+
 export function absoluteUrl(path) {
   if (!path) return "";
   if (/^https?:\/\//i.test(path)) return path;
@@ -56,4 +81,8 @@ export function absoluteUrl(path) {
 
 export function handoffUrl(imageId) {
   return `${API_BASE}/api/v1/images/${imageId}/handoff`;
+}
+
+export function module3HandoffUrl(batchId) {
+  return `${API_BASE}/api/v1/counterfactuals/batches/${batchId}/handoff`;
 }

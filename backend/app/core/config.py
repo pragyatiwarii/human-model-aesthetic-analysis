@@ -23,8 +23,9 @@ class Settings(BaseSettings):
     uploads_dir: Path = RUNTIME_DIR / "uploads"
     annotated_dir: Path = RUNTIME_DIR / "annotated"
     regions_dir: Path = RUNTIME_DIR / "regions"
+    counterfactuals_dir: Path = RUNTIME_DIR / "counterfactuals"
 
-    # New DB name prevents stale schema conflicts from older module versions.
+    # Extend the clean v1.4 Module 1 database so existing image/region IDs remain valid.
     db_path: Path = RUNTIME_DIR / "module1_v14.db"
 
     model_config = SettingsConfigDict(
@@ -43,5 +44,6 @@ for directory in (
     settings.uploads_dir,
     settings.annotated_dir,
     settings.regions_dir,
+    settings.counterfactuals_dir,
 ):
     directory.mkdir(parents=True, exist_ok=True)

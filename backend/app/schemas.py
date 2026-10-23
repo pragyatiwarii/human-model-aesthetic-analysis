@@ -1,6 +1,8 @@
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+Severity = Literal["subtle", "moderate", "strong"]
 
 
 class DatasetRecordOut(BaseModel):
@@ -76,3 +78,57 @@ class HandoffOut(BaseModel):
 
     agiqa3k_ground_truth: dict[str, Any]
     regions: list[RegionOut]
+
+
+class PerturbationSpecOut(BaseModel):
+    key: str
+    label: str
+    description: str
+    region_controlled: bool = True
+    severities: dict[str, dict[str, Any]]
+
+
+class CounterfactualGenerateIn(BaseModel):
+    image_id: str
+    region_id: str
+    perturbation_type: str
+    severities: list[Severity] = Field(
+        default_factory=lambda: ["subtle", "moderate", "strong"],
+        min_length=1,
+    )
+
+
+class CounterfactualVariantOut(BaseModel):
+    counterfactual_id: str
+    batch_id: str
+    image_id: str
+    region_id: str
+    region_label: str
+    perturbation_type: str
+    severity: Severity
+    parameters: dict[str, Any]
+    counterfactual_url: str
+    validation: dict[str, Any]
+
+
+class CounterfactualBatchOut(BaseModel):
+    schema_version: str = "2.0-counterfactual"
+    batch_id: str
+    original_image_id: str
+    original_image_url: str
+    dataset_image_name: str
+    prompt: str
+    generator: str | None = None
+    agiqa3k_ground_truth: dict[str, Any]
+    region: RegionOut
+    perturbation_type: str
+    variants: list[CounterfactualVariantOut]
+
+
+class Module3HandoffOut(BaseModel):
+    schema_version: str = "2.0-module3-handoff"
+    batch_id: str
+    original: dict[str, Any]
+    region: dict[str, Any]
+    perturbation: dict[str, Any]
+    counterfactuals: list[dict[str, Any]]

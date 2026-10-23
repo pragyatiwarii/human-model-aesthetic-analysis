@@ -42,6 +42,27 @@ CREATE TABLE IF NOT EXISTS regions (
     is_fallback INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (image_id) REFERENCES analyses(image_id)
 );
+
+CREATE TABLE IF NOT EXISTS counterfactuals (
+    counterfactual_id TEXT PRIMARY KEY,
+    batch_id TEXT NOT NULL,
+    image_id TEXT NOT NULL,
+    region_id TEXT NOT NULL,
+    perturbation_type TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    parameters_json TEXT NOT NULL,
+    validation_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (image_id) REFERENCES analyses(image_id),
+    FOREIGN KEY (region_id) REFERENCES regions(region_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_counterfactual_batch
+ON counterfactuals(batch_id);
+
+CREATE INDEX IF NOT EXISTS idx_counterfactual_image
+ON counterfactuals(image_id);
 """
 
 
@@ -166,22 +187,7 @@ def get_analysis(image_id: str) -> dict[str, Any] | None:
             (image_id,),
         ).fetchall()
 
-    regions = [
-        {
-            "region_id": row["region_id"],
-            "label": row["label"],
-            "confidence": row["confidence"],
-            "bbox": json.loads(row["bbox_json"]),
-            "polygon": (
-                json.loads(row["polygon_json"])
-                if row["polygon_json"]
-                else None
-            ),
-            "mask_filename": row["mask_filename"],
-            "is_fallback": bool(row["is_fallback"]),
-        }
-        for row in rows
-    ]
+    regions = [_region_row_to_dict(row) for row in rows]
 
     return {
         "image_id": analysis["image_id"],
@@ -204,3 +210,103 @@ def get_analysis(image_id: str) -> dict[str, Any] | None:
         "created_at": analysis["created_at"],
         "regions": regions,
     }
+
+
+def _region_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "region_id": row["region_id"],
+        "image_id": row["image_id"],
+        "label": row["label"],
+        "confidence": row["confidence"],
+        "bbox": json.loads(row["bbox_json"]),
+        "polygon": (
+            json.loads(row["polygon_json"])
+            if row["polygon_json"]
+            else None
+        ),
+        "mask_filename": row["mask_filename"],
+        "is_fallback": bool(row["is_fallback"]),
+    }
+
+
+def get_region(image_id: str, region_id: str) -> dict[str, Any] | None:
+    with connection() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM regions
+            WHERE image_id = ? AND region_id = ?
+            """,
+            (image_id, region_id),
+        ).fetchone()
+
+    return _region_row_to_dict(row) if row else None
+
+
+def save_counterfactuals(rows: list[dict[str, Any]]) -> None:
+    created_at = datetime.now(timezone.utc).isoformat()
+
+    with connection() as conn:
+        conn.executemany(
+            """
+            INSERT INTO counterfactuals (
+                counterfactual_id,
+                batch_id,
+                image_id,
+                region_id,
+                perturbation_type,
+                severity,
+                filename,
+                parameters_json,
+                validation_json,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    row["counterfactual_id"],
+                    row["batch_id"],
+                    row["image_id"],
+                    row["region_id"],
+                    row["perturbation_type"],
+                    row["severity"],
+                    row["filename"],
+                    json.dumps(row["parameters"]),
+                    json.dumps(row["validation"]),
+                    created_at,
+                )
+                for row in rows
+            ],
+        )
+
+
+def get_counterfactual_batch(batch_id: str) -> list[dict[str, Any]]:
+    with connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM counterfactuals
+            WHERE batch_id = ?
+            ORDER BY CASE severity
+                WHEN 'subtle' THEN 1
+                WHEN 'moderate' THEN 2
+                WHEN 'strong' THEN 3
+                ELSE 4
+            END
+            """,
+            (batch_id,),
+        ).fetchall()
+
+    return [
+        {
+            "counterfactual_id": row["counterfactual_id"],
+            "batch_id": row["batch_id"],
+            "image_id": row["image_id"],
+            "region_id": row["region_id"],
+            "perturbation_type": row["perturbation_type"],
+            "severity": row["severity"],
+            "filename": row["filename"],
+            "parameters": json.loads(row["parameters_json"]),
+            "validation": json.loads(row["validation_json"]),
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -11,16 +12,29 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
 from app.core.config import DATA_DIR, settings
-from app.db import get_analysis, init_db, save_analysis
+from app.db import (
+    get_analysis,
+    get_counterfactual_batch,
+    get_region,
+    init_db,
+    save_analysis,
+    save_counterfactuals,
+)
 from app.schemas import (
     AnalysisOut,
+    CounterfactualBatchOut,
+    CounterfactualGenerateIn,
+    CounterfactualVariantOut,
     DatasetListOut,
     DatasetRecordOut,
     HandoffOut,
+    Module3HandoffOut,
+    PerturbationSpecOut,
     RegionOut,
 )
 from app.services.agiqa3k import get_record, list_records, status
 from app.services.context import build_context
+from app.services.counterfactual_engine import PERTURBATIONS, generate_variant, public_specs
 from app.services.image_utils import create_annotated_preview
 from app.services.region_detector import RegionDetector
 
@@ -33,10 +47,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title=settings.app_name,
-    version="1.4.0-module-1",
+    version="2.0.0-module-2",
     description=(
-        "AGIQA-3K input, reliable region detection/segmentation, "
-        "and Module 2 handoff."
+        "Module 1 AGIQA-3K region intelligence plus Module 2 controlled "
+        "counterfactual generation for Sanyojita Priyadarshani Singh."
     ),
     lifespan=lifespan,
 )
@@ -84,6 +98,18 @@ def region_out(image_id: str, region: dict) -> RegionOut:
     )
 
 
+def ground_truth(record: dict) -> dict:
+    return {
+        "adj1": record.get("adj1"),
+        "adj2": record.get("adj2"),
+        "style": record.get("style"),
+        "mos_quality": record.get("mos_quality"),
+        "std_quality": record.get("std_quality"),
+        "mos_align": record.get("mos_align"),
+        "std_align": record.get("std_align"),
+    }
+
+
 def analysis_out(record: dict) -> AnalysisOut:
     return AnalysisOut(
         image_id=record["image_id"],
@@ -117,17 +143,76 @@ def analysis_out(record: dict) -> AnalysisOut:
     )
 
 
+def counterfactual_url(filename: str) -> str:
+    normalized = filename.replace("\\", "/")
+    return f"/media/runtime/counterfactuals/{normalized}"
+
+
+def batch_out(batch_id: str) -> CounterfactualBatchOut:
+    rows = get_counterfactual_batch(batch_id)
+    if not rows:
+        raise HTTPException(
+            status_code=404,
+            detail="Counterfactual batch not found.",
+        )
+
+    first = rows[0]
+    analysis = get_analysis(first["image_id"])
+    region = get_region(first["image_id"], first["region_id"])
+
+    if analysis is None or region is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Counterfactual batch references missing Module 1 data.",
+        )
+
+    return CounterfactualBatchOut(
+        batch_id=batch_id,
+        original_image_id=analysis["image_id"],
+        original_image_url=(
+            f'/media/runtime/uploads/{analysis["stored_filename"]}'
+        ),
+        dataset_image_name=analysis["dataset_image_name"],
+        prompt=analysis["prompt"],
+        generator=analysis["generator"],
+        agiqa3k_ground_truth=ground_truth(analysis),
+        region=region_out(analysis["image_id"], region),
+        perturbation_type=first["perturbation_type"],
+        variants=[
+            CounterfactualVariantOut(
+                counterfactual_id=row["counterfactual_id"],
+                batch_id=row["batch_id"],
+                image_id=row["image_id"],
+                region_id=row["region_id"],
+                region_label=region["label"],
+                perturbation_type=row["perturbation_type"],
+                severity=row["severity"],
+                parameters=row["parameters"],
+                counterfactual_url=counterfactual_url(row["filename"]),
+                validation=row["validation"],
+            )
+            for row in rows
+        ],
+    )
+
+
 @app.get("/health")
 def health():
     return {
         "status": "ok",
-        "module": 1,
-        "owner": "Vennela Laxmi Puli",
+        "module": 2,
+        "module_1_owner": "Vennela Laxmi Puli",
+        "module_2_owner": "Sanyojita Priyadarshani Singh",
         "dataset": "AGIQA-3K",
         "caption_model": "not used",
         "detection_confidence": settings.detection_confidence,
         "ml_models_enabled": settings.enable_ml_models,
+        "counterfactual_output": "lossless PNG",
+        "perturbation_count": len(PERTURBATIONS),
     }
+
+
+# -------------------------- Module 1 ---------------------------------
 
 
 @app.get(f"{settings.api_prefix}/dataset/status")
@@ -318,4 +403,150 @@ def module_2_handoff(image_id: str):
             "std_align": result.std_align,
         },
         regions=result.regions,
+    )
+
+
+# -------------------------- Module 2 ---------------------------------
+
+
+@app.get(
+    f"{settings.api_prefix}/perturbations",
+    response_model=list[PerturbationSpecOut],
+)
+def list_perturbations():
+    return public_specs()
+
+
+@app.post(
+    f"{settings.api_prefix}/counterfactuals/generate",
+    response_model=CounterfactualBatchOut,
+)
+def generate_counterfactuals(payload: CounterfactualGenerateIn):
+    analysis = get_analysis(payload.image_id)
+    if not analysis:
+        raise HTTPException(
+            status_code=404,
+            detail="Module 1 image analysis not found. Run Module 1 first.",
+        )
+
+    region = get_region(payload.image_id, payload.region_id)
+    if not region:
+        raise HTTPException(
+            status_code=404,
+            detail="Selected region does not belong to this image.",
+        )
+
+    if payload.perturbation_type not in PERTURBATIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported perturbation: {payload.perturbation_type}",
+        )
+
+    requested: list[str] = []
+    for severity in payload.severities:
+        if severity not in requested:
+            requested.append(severity)
+
+    original_path = settings.uploads_dir / analysis["stored_filename"]
+    if not original_path.exists():
+        raise HTTPException(
+            status_code=409,
+            detail="Stored Module 1 original image is missing.",
+        )
+
+    batch_id = str(uuid4())
+    output_dir = settings.counterfactuals_dir / payload.image_id / batch_id
+
+    rows: list[dict] = []
+
+    try:
+        for severity in requested:
+            counterfactual_id = str(uuid4())
+            filename = f"{severity}.png"
+            relative_filename = str(
+                Path(payload.image_id) / batch_id / filename
+            )
+            output_path = output_dir / filename
+
+            seed_bytes = hashlib.sha256(
+                f"{batch_id}:{severity}".encode("utf-8")
+            ).digest()[:4]
+            seed = int.from_bytes(seed_bytes, "big", signed=False)
+
+            parameters, validation = generate_variant(
+                original_path=original_path,
+                image_id=payload.image_id,
+                region=region,
+                perturbation_type=payload.perturbation_type,
+                severity=severity,
+                output_path=output_path,
+                seed=seed,
+            )
+
+            rows.append(
+                {
+                    "counterfactual_id": counterfactual_id,
+                    "batch_id": batch_id,
+                    "image_id": payload.image_id,
+                    "region_id": payload.region_id,
+                    "perturbation_type": payload.perturbation_type,
+                    "severity": severity,
+                    "filename": relative_filename,
+                    "parameters": parameters,
+                    "validation": validation,
+                }
+            )
+    except (ValueError, RuntimeError) as exc:
+        shutil.rmtree(output_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    save_counterfactuals(rows)
+    return batch_out(batch_id)
+
+
+@app.get(
+    f"{settings.api_prefix}/counterfactuals/batches/{{batch_id}}",
+    response_model=CounterfactualBatchOut,
+)
+def retrieve_counterfactual_batch(batch_id: str):
+    return batch_out(batch_id)
+
+
+@app.get(
+    f"{settings.api_prefix}/counterfactuals/batches/{{batch_id}}/handoff",
+    response_model=Module3HandoffOut,
+)
+def module_3_handoff(batch_id: str):
+    batch = batch_out(batch_id)
+
+    spec = PERTURBATIONS[batch.perturbation_type]
+
+    return Module3HandoffOut(
+        batch_id=batch.batch_id,
+        original={
+            "image_id": batch.original_image_id,
+            "dataset_name": "AGIQA-3K",
+            "dataset_image_name": batch.dataset_image_name,
+            "image_url": batch.original_image_url,
+            "prompt": batch.prompt,
+            "generator": batch.generator,
+            "agiqa3k_ground_truth": batch.agiqa3k_ground_truth,
+        },
+        region=batch.region.model_dump(),
+        perturbation={
+            "type": batch.perturbation_type,
+            "label": spec["label"],
+            "description": spec["description"],
+            "region_controlled": True,
+        },
+        counterfactuals=[
+            {
+                "counterfactual_id": variant.counterfactual_id,
+                "severity": variant.severity,
+                "parameters": variant.parameters,
+                "image_url": variant.counterfactual_url,
+                "validation": variant.validation,
+            }
+            for variant in batch.variants
+        ],
     )

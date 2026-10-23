@@ -1,34 +1,67 @@
 # Human–Model Aesthetic Agreement Analysis
-## Module 1 — Vennela Laxmi Puli — clean v1.4
 
-This is a clean rebuild of Module 1. It intentionally contains only the
-information required by later modules.
+## Modules 1 → 2 integrated build
 
-## Module 1 does
+- **Module 1 — Vennela Laxmi Puli:** AGIQA-3K input, metadata, confidence-filtered YOLO segmentation, and safe `full_image` fallback.
+- **Module 2 — Sanyojita Priyadarshani Singh:** controlled region-specific counterfactual generation and Module 3 handoff.
 
-- browse the AGIQA-3K dataset
-- load the original AGIQA-3K image and prompt
-- retain AGIQA-3K MOS/STD metadata
-- detect/segment reliable editable regions using YOLO segmentation
-- reject weak detections below the configured confidence threshold
-- return a safe `full_image` fallback if no reliable object is detected
-- save region polygons/masks when segmentation is available
-- provide a stable Module 2 handoff JSON
+Module 1 remains conceptually frozen at the `v1.4-module-1-vennela` boundary. Module 2 consumes that output rather than replacing its responsibility.
 
-## Module 1 does NOT do
+## What Module 2 does
 
-- BLIP caption generation
-- generic image captioning
-- counterfactual image modification
-- aesthetic scoring
-- human voting
-- human/model statistical comparison
+Module 2 takes a Module 1 `image_id` and selected `region_id`, applies one controlled perturbation, and produces three counterfactuals:
 
-Those are not needed for the Module 1 → Module 2 boundary.
+```text
+Module 1 image + selected region
+        ↓
+choose one perturbation
+        ↓
+subtle  |  moderate  |  strong
+        ↓
+lossless PNG counterfactuals
+        ↓
+outside-region isolation validation
+        ↓
+Module 3 handoff JSON
+```
 
-## Required local dataset
+Supported perturbations:
 
-The ZIP does not redistribute AGIQA-3K. Put your existing dataset here:
+- brightness reduction
+- contrast reduction
+- saturation reduction
+- Gaussian blur
+- Gaussian noise
+- over-sharpening
+- colour / hue shift
+- pixelation
+- structural distortion
+
+Each perturbation has fixed, explicit severity parameters returned in the API response. Gaussian noise also stores its deterministic seed.
+
+## Scientific isolation rule
+
+Counterfactual outputs are saved as **PNG**, not JPEG. JPEG recompression can alter pixels outside the intended edit region even if the image operation itself was masked.
+
+For every generated variant, Module 2 reopens the persisted PNG and validates:
+
+```text
+outside_region_max_abs_diff == 0
+```
+
+If that invariant fails, the variant is rejected.
+
+The response also records:
+
+- mask source (`segmentation_mask`, `polygon`, `bbox`, or `full_image`)
+- region pixel fraction
+- inside-region mean absolute difference
+- inside-region changed-pixel fraction
+- outside-region exact preservation result
+
+## Required local AGIQA-3K data
+
+The project does not redistribute AGIQA-3K. Keep the dataset locally at:
 
 ```text
 backend/data/agiqa3k/
@@ -38,8 +71,7 @@ backend/data/agiqa3k/
     └── ...
 ```
 
-If you already have a working AGIQA-3K folder from the earlier version,
-copy the entire `agiqa3k` folder into `backend/data/`.
+If you already have the dataset in the Module 1 project, keep that folder in place when applying the Module 2 patch.
 
 ## Recommended environment
 
@@ -50,50 +82,61 @@ copy the entire `agiqa3k` folder into `backend/data/`.
 
 ## Backend
 
+From the project root:
+
 ```powershell
 cd backend
-
-py -3.11 -m venv .venv
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .venv\Scripts\Activate.ps1
-
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-
-Copy-Item .env.example .env
-
+python -m pip install -r requirements.txt
+Copy-Item .env.example .env -ErrorAction SilentlyContinue
+python -m pytest -q
 uvicorn app.main:app --reload
 ```
 
-Check:
+If `.venv` does not exist yet:
+
+```powershell
+py -3.11 -m venv .venv
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+Health check:
 
 ```text
 http://127.0.0.1:8000/health
-http://127.0.0.1:8000/api/v1/dataset/status
-http://127.0.0.1:8000/docs
 ```
 
-Expected dataset status after copying the complete dataset:
+Expected Module 2 health fields include:
 
 ```json
 {
-  "dataset": "AGIQA-3K",
-  "metadata_found": true,
-  "record_count": 2982,
-  "available_image_count": 2982,
-  "missing_image_count": 0,
-  "ready": true
+  "status": "ok",
+  "module": 2,
+  "module_1_owner": "Vennela Laxmi Puli",
+  "module_2_owner": "Sanyojita Priyadarshani Singh",
+  "counterfactual_output": "lossless PNG",
+  "perturbation_count": 9
 }
+```
+
+API docs:
+
+```text
+http://127.0.0.1:8000/docs
 ```
 
 ## Frontend
 
-Open a second terminal:
+Open a second PowerShell terminal:
 
 ```powershell
 cd frontend
 npm.cmd install
-Copy-Item .env.example .env
+Copy-Item .env.example .env -ErrorAction SilentlyContinue
 npm.cmd run dev
 ```
 
@@ -103,63 +146,69 @@ Open:
 http://127.0.0.1:5173
 ```
 
-## Core workflow
+## How to test Module 2
+
+1. Select an AGIQA-3K sample.
+2. Click **Run Module 1**.
+3. Select an object region, or use the `full_image` fallback when no reliable object exists.
+4. In **Module 2 — Sanyojita**, choose a perturbation such as Gaussian blur.
+5. Click **Generate subtle · moderate · strong**.
+6. Verify three variants appear.
+7. Each variant should show `Outside region: unchanged ✓`.
+8. Open the Module 3 handoff JSON.
+
+For a detected object, only the selected region should change. For a Module 1 `full_image` fallback, the whole image is the valid edit region.
+
+## Module 2 API
+
+### List perturbations
 
 ```text
-AGIQA-3K sample
-      ↓
-original image + prompt + MOS metadata
-      ↓
-YOLO segmentation/detection
-      ↓
-confidence filtering
-      ↓
-reliable regions
-      ↓
-or full_image fallback
-      ↓
-region ID + bbox + polygon/mask
-      ↓
-Module 2 handoff JSON
+GET /api/v1/perturbations
 ```
 
-## Detection confidence
+### Generate counterfactuals
 
-The default is:
-
-```env
-DETECTION_CONFIDENCE=0.55
+```text
+POST /api/v1/counterfactuals/generate
 ```
 
-A weak prediction such as `bear = 0.36` will therefore be rejected.
+Example request:
 
-## Module 2 handoff
-
-After running Module 1:
-
-```http
-GET /api/v1/images/{image_id}/handoff
+```json
+{
+  "image_id": "<module-1-image-id>",
+  "region_id": "<module-1-region-id>",
+  "perturbation_type": "blur",
+  "severities": ["subtle", "moderate", "strong"]
+}
 ```
 
-This is the exact boundary for Sanyojita's Module 2.
+### Retrieve a generated batch
 
-## Tests
-
-```powershell
-cd backend
-pytest -q
+```text
+GET /api/v1/counterfactuals/batches/{batch_id}
 ```
+
+### Module 3 handoff
+
+```text
+GET /api/v1/counterfactuals/batches/{batch_id}/handoff
+```
+
+The handoff contains the original AGIQA identity and human ground truth, the selected Module 1 region, exact perturbation metadata, all three counterfactual URLs, parameters, and isolation validation.
 
 ## Git checkpoint
 
-After testing locally:
+After local testing succeeds:
 
-```bash
+```powershell
+git status
 git add .
-git commit -m "feat(module-1): clean AGIQA region handoff pipeline"
-git tag v1.4-module-1-vennela
+git commit -m "feat(module-2): add controlled counterfactual generation"
+git tag v2.0-module-2-sanyojita
 git push origin main
-git push origin v1.4-module-1-vennela
+git push origin v2.0-module-2-sanyojita
 ```
 
-# MODULE 1 ENDS HERE — SAFE TO PUSH AFTER LOCAL TESTING
+Do not move the existing `v1.4-module-1-vennela` tag. That tag remains the frozen Module 1 checkpoint.

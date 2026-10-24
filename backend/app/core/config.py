@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     yolo_model: str = "yolov8n-seg.pt"
     detection_confidence: float = 0.55
 
+    enable_context_vlm: bool = True
+    context_vlm_model: str = "Salesforce/blip-image-captioning-base"
+    context_vlm_device: str = "auto"
+    context_vlm_max_new_tokens: int = 40
+
     agiqa_metadata_path: Path = AGIQA_DIR / "data.csv"
     agiqa_images_dir: Path = AGIQA_DIR / "images"
 

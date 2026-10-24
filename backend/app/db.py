@@ -92,6 +92,20 @@ CREATE TABLE IF NOT EXISTS human_preferences (
 
 CREATE INDEX IF NOT EXISTS idx_human_preferences_batch
 ON human_preferences(batch_id);
+
+CREATE TABLE IF NOT EXISTS pairwise_preferences (
+    preference_id TEXT PRIMARY KEY,
+    batch_id TEXT NOT NULL,
+    participant_code TEXT NOT NULL,
+    counterfactual_id TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    choice TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_pairwise_preferences_batch
+ON pairwise_preferences(batch_id);
+
 """
 
 
@@ -445,6 +459,73 @@ def get_human_preferences(batch_id: str) -> list[dict[str, Any]]:
             "ratings": json.loads(row["ratings_json"]),
             "preferred_candidate_id": row["preferred_candidate_id"],
             "notes": row["notes"],
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
+
+
+def get_analyzable_batch_ids() -> list[str]:
+    """Return batches that have both Module 3 model scores and human responses."""
+    with connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT c.batch_id
+            FROM counterfactuals c
+            INNER JOIN aesthetic_scores a ON a.batch_id = c.batch_id
+            INNER JOIN human_preferences h ON h.batch_id = c.batch_id
+            ORDER BY c.created_at DESC
+            """
+        ).fetchall()
+    return [row["batch_id"] for row in rows]
+
+
+def save_pairwise_preferences(rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    created_at = datetime.now(timezone.utc).isoformat()
+    batch_id = rows[0]["batch_id"]
+    participant_code = rows[0]["participant_code"]
+    with connection() as conn:
+        conn.execute(
+            "DELETE FROM pairwise_preferences WHERE batch_id = ? AND participant_code = ?",
+            (batch_id, participant_code),
+        )
+        conn.executemany(
+            """
+            INSERT INTO pairwise_preferences (
+                preference_id, batch_id, participant_code, counterfactual_id,
+                severity, choice, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    row["preference_id"], row["batch_id"], row["participant_code"],
+                    row["counterfactual_id"], row["severity"], row["choice"], created_at,
+                )
+                for row in rows
+            ],
+        )
+
+
+def get_pairwise_preferences(batch_id: str) -> list[dict[str, Any]]:
+    with connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM pairwise_preferences
+            WHERE batch_id = ?
+            ORDER BY created_at, participant_code, severity
+            """,
+            (batch_id,),
+        ).fetchall()
+    return [
+        {
+            "preference_id": row["preference_id"],
+            "batch_id": row["batch_id"],
+            "participant_code": row["participant_code"],
+            "counterfactual_id": row["counterfactual_id"],
+            "severity": row["severity"],
+            "choice": row["choice"],
             "created_at": row["created_at"],
         }
         for row in rows

@@ -21,7 +21,7 @@ def gradient_image(size=(40, 30)) -> Image.Image:
         ],
         axis=2,
     ).astype(np.uint8)
-    return Image.fromarray(arr, "RGB")
+    return Image.fromarray(arr)
 
 
 def square_region() -> dict:

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
@@ -14,21 +16,25 @@ from PIL import Image
 from app.core.config import DATA_DIR, settings
 from app.db import (
     get_aesthetic_scores,
+    get_analyzable_batch_ids,
     get_analysis,
     get_counterfactual_batch,
     get_human_preferences,
+    get_pairwise_preferences,
     get_region,
     init_db,
     save_aesthetic_scores,
     save_analysis,
     save_counterfactuals,
     save_human_preference,
+    save_pairwise_preferences,
 )
 from app.schemas import (
     AestheticBatchScoresOut,
     AestheticModelStatusOut,
     AestheticScoreOut,
     AestheticTrainIn,
+    BatchAgreementOut,
     AnalysisOut,
     CounterfactualBatchOut,
     CounterfactualGenerateIn,
@@ -39,12 +45,17 @@ from app.schemas import (
     HumanPreferenceIn,
     HumanPreferenceOut,
     Module3HandoffOut,
+    Module4DashboardOut,
     Module4HandoffOut,
+    PairwisePreferenceIn,
+    PairwisePreferenceOut,
+    PairwisePreferenceSubmissionOut,
     PerturbationSpecOut,
     RegionOut,
 )
 from app.services.agiqa3k import get_record, list_records, status
-from app.services.context import build_context
+from app.services.agreement_analysis import analyze_batch_handoff, summarize_dashboard
+from app.services.context import build_context, context_vlm_status
 from app.services.aesthetic_scorer import load_model, model_status, score_image, train_model
 from app.services.counterfactual_engine import PERTURBATIONS, generate_variant, public_specs
 from app.services.image_utils import create_annotated_preview
@@ -59,10 +70,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title=settings.app_name,
-    version="3.0.0-module-3",
+    version="4.3.0-context-quality",
     description=(
-        "Modules 1-2 plus Module 3 aesthetic scoring and human preference "
-        "collection for Muskan Dubey."
+        "Modules 1-3 plus Module 4 human-model agreement analysis, final "
+        "dashboard, disagreement reporting, and structured VLM-assisted context extraction."
     ),
     lifespan=lifespan,
 )
@@ -125,6 +136,7 @@ def ground_truth(record: dict) -> dict:
 def analysis_out(record: dict) -> AnalysisOut:
     return AnalysisOut(
         image_id=record["image_id"],
+        dataset_name=(record.get("context") or {}).get("source_dataset", "AGIQA-3K"),
         dataset_image_name=record["dataset_image_name"],
         prompt=record["prompt"],
         generator=record["generator"],
@@ -180,6 +192,7 @@ def batch_out(batch_id: str) -> CounterfactualBatchOut:
 
     return CounterfactualBatchOut(
         batch_id=batch_id,
+        dataset_name=(analysis.get("context") or {}).get("source_dataset", "AGIQA-3K"),
         original_image_id=analysis["image_id"],
         original_image_url=(
             f'/media/runtime/uploads/{analysis["stored_filename"]}'
@@ -188,6 +201,7 @@ def batch_out(batch_id: str) -> CounterfactualBatchOut:
         prompt=analysis["prompt"],
         generator=analysis["generator"],
         agiqa3k_ground_truth=ground_truth(analysis),
+        context=analysis["context"],
         region=region_out(analysis["image_id"], region),
         perturbation_type=first["perturbation_type"],
         variants=[
@@ -212,18 +226,33 @@ def batch_out(batch_id: str) -> CounterfactualBatchOut:
 def health():
     return {
         "status": "ok",
-        "module": 3,
+        "module": 4,
         "module_1_owner": "Vennela Laxmi Puli",
         "module_2_owner": "Sanyojita Priyadarshani Singh",
         "module_3_owner": "Muskan Dubey",
+        "module_4_owner": "Pragya Tiwari",
         "dataset": "AGIQA-3K",
-        "caption_model": "not used",
+        "context_extraction": context_vlm_status(enabled=settings.enable_context_vlm, model_name=settings.context_vlm_model),
+        "structured_context": True,
+        "context_quality_cleanup": True,
+        "context_schema_version": "1.6-context-quality",
         "detection_confidence": settings.detection_confidence,
         "ml_models_enabled": settings.enable_ml_models,
         "counterfactual_output": "lossless PNG",
         "perturbation_count": len(PERTURBATIONS),
         "aesthetic_model": model_status(),
         "human_preference_collection": True,
+        "pairwise_preference_protocol": "Original / Modified / About the same",
+        "agreement_analysis": True,
+        "final_dashboard": True,
+        "error_reporting": True,
+        "pdf_quantitative_alignment": True,
+        "required_quantitative_figures": 7,
+        "statistics": [
+            "delta_model_score", "human_preference_rate", "directional_agreement",
+            "pearson", "spearman", "mae", "rmse", "disagreement_rate",
+            "severity_response_slope", "effect_size", "95_percent_ci"
+        ],
     }
 
 
@@ -233,6 +262,99 @@ def health():
 @app.get(f"{settings.api_prefix}/dataset/status")
 def dataset_status():
     return status()
+
+
+@app.get(f"{settings.api_prefix}/context/status")
+def context_status():
+    return context_vlm_status(
+        enabled=settings.enable_context_vlm,
+        model_name=settings.context_vlm_model,
+    )
+
+
+@app.post(
+    f"{settings.api_prefix}/images/analyze-upload",
+    response_model=AnalysisOut,
+)
+async def analyze_uploaded_image(
+    image: UploadFile = File(...),
+    prompt: str = Form(...),
+    generator: str = Form("custom-upload"),
+    category: str | None = Form(None),
+):
+    if not prompt.strip():
+        raise HTTPException(status_code=400, detail="Prompt is required for a custom image.")
+
+    suffix = Path(image.filename or "upload.png").suffix.lower()
+    if suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
+        raise HTTPException(status_code=400, detail="Use a JPG, PNG, or WEBP image.")
+
+    content = await image.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded image is empty.")
+    if len(content) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Uploaded image must be 20 MB or smaller.")
+
+    image_id = str(uuid4())
+    stored_filename = f"{image_id}{suffix}"
+    stored_path = settings.uploads_dir / stored_filename
+    stored_path.write_bytes(content)
+
+    try:
+        with Image.open(stored_path) as pil:
+            pil = pil.convert("RGB")
+            width, height = pil.size
+            regions, detector_info = detector.detect(
+                image_path=stored_path,
+                image_id=image_id,
+                width=width,
+                height=height,
+            )
+            context = build_context(
+                image=pil,
+                prompt=prompt.strip(),
+                regions=regions,
+                confidence_threshold=settings.detection_confidence,
+                style=category.strip() if category else None,
+                enable_vlm=settings.enable_context_vlm,
+                vlm_model=settings.context_vlm_model,
+                vlm_device=settings.context_vlm_device,
+                vlm_max_new_tokens=settings.context_vlm_max_new_tokens,
+            )
+            context["source_dataset"] = "custom-upload"
+    except Exception as exc:
+        stored_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=f"Could not read uploaded image: {exc}") from exc
+
+    annotated_filename = f"{image_id}.jpg"
+    create_annotated_preview(stored_path, settings.annotated_dir / annotated_filename, regions)
+
+    record = {
+        "name": image.filename or stored_filename,
+        "prompt": prompt.strip(),
+        "generator": generator.strip() or "custom-upload",
+        "adj1": None,
+        "adj2": None,
+        "style": category.strip() if category else None,
+        "mos_quality": None,
+        "std_quality": None,
+        "mos_align": None,
+        "std_align": None,
+    }
+    save_analysis(
+        image_id=image_id,
+        dataset_record=record,
+        stored_filename=stored_filename,
+        width=width,
+        height=height,
+        context=context,
+        detector=detector_info,
+        annotated_filename=annotated_filename,
+        regions=regions,
+    )
+    saved = get_analysis(image_id)
+    assert saved is not None
+    return analysis_out(saved)
 
 
 @app.get(
@@ -342,7 +464,15 @@ def analyze_dataset_image(image_name: str):
             prompt=record.prompt,
             regions=regions,
             confidence_threshold=settings.detection_confidence,
+            adj1=record.adj1,
+            adj2=record.adj2,
+            style=record.style,
+            enable_vlm=settings.enable_context_vlm,
+            vlm_model=settings.context_vlm_model,
+            vlm_device=settings.context_vlm_device,
+            vlm_max_new_tokens=settings.context_vlm_max_new_tokens,
         )
+        context["source_dataset"] = "AGIQA-3K"
 
     annotated_filename = f"{image_id}.jpg"
     annotated_path = settings.annotated_dir / annotated_filename
@@ -404,6 +534,7 @@ def module_2_handoff(image_id: str):
 
     return HandoffOut(
         image_id=result.image_id,
+        dataset_name=result.dataset_name,
         dataset_image_name=result.dataset_image_name,
         original_image_url=result.original_image_url,
         prompt=result.prompt,
@@ -417,6 +548,7 @@ def module_2_handoff(image_id: str):
             "mos_align": result.mos_align,
             "std_align": result.std_align,
         },
+        context=result.context,
         regions=result.regions,
     )
 
@@ -540,12 +672,13 @@ def module_3_handoff(batch_id: str):
         batch_id=batch.batch_id,
         original={
             "image_id": batch.original_image_id,
-            "dataset_name": "AGIQA-3K",
+            "dataset_name": batch.dataset_name,
             "dataset_image_name": batch.dataset_image_name,
             "image_url": batch.original_image_url,
             "prompt": batch.prompt,
             "generator": batch.generator,
             "agiqa3k_ground_truth": batch.agiqa3k_ground_truth,
+            "context": batch.context,
         },
         region=batch.region.model_dump(),
         perturbation={
@@ -722,6 +855,56 @@ def retrieve_human_preferences(batch_id: str):
     return [HumanPreferenceOut(**row) for row in get_human_preferences(batch_id)]
 
 
+@app.post(
+    f"{settings.api_prefix}/human-preferences/pairwise",
+    response_model=PairwisePreferenceSubmissionOut,
+)
+def submit_pairwise_preference(payload: PairwisePreferenceIn):
+    _analysis, _region, candidates = _batch_candidates(payload.batch_id)
+    counterfactuals = {
+        candidate["candidate_id"]: candidate
+        for candidate in candidates
+        if candidate["source_type"] == "counterfactual"
+    }
+    if set(payload.responses) != set(counterfactuals):
+        raise HTTPException(
+            status_code=400,
+            detail="Provide Original / Modified / About the same for every counterfactual severity.",
+        )
+
+    participant_code = payload.participant_code.strip()
+    rows = [
+        {
+            "preference_id": str(uuid4()),
+            "batch_id": payload.batch_id,
+            "participant_code": participant_code,
+            "counterfactual_id": candidate_id,
+            "severity": counterfactuals[candidate_id]["severity"],
+            "choice": choice,
+        }
+        for candidate_id, choice in payload.responses.items()
+    ]
+    save_pairwise_preferences(rows)
+    stored = [
+        row for row in get_pairwise_preferences(payload.batch_id)
+        if row["participant_code"] == participant_code
+    ]
+    return PairwisePreferenceSubmissionOut(
+        batch_id=payload.batch_id,
+        participant_code=participant_code,
+        responses=[PairwisePreferenceOut(**row) for row in stored],
+    )
+
+
+@app.get(
+    f"{settings.api_prefix}/human-preferences/pairwise/batches/{{batch_id}}",
+    response_model=list[PairwisePreferenceOut],
+)
+def retrieve_pairwise_preferences(batch_id: str):
+    _batch_candidates(batch_id)
+    return [PairwisePreferenceOut(**row) for row in get_pairwise_preferences(batch_id)]
+
+
 @app.get(
     f"{settings.api_prefix}/module3/batches/{{batch_id}}/handoff",
     response_model=Module4HandoffOut,
@@ -730,6 +913,7 @@ def module_4_handoff(batch_id: str):
     analysis, region, candidates = _batch_candidates(batch_id)
     score_rows = get_aesthetic_scores(batch_id)
     preferences = get_human_preferences(batch_id)
+    pairwise_preferences = get_pairwise_preferences(batch_id)
 
     if not score_rows:
         raise HTTPException(status_code=409, detail="Score the batch with Module 3 before Module 4 handoff.")
@@ -767,11 +951,13 @@ def module_4_handoff(batch_id: str):
         batch_id=batch_id,
         original={
             "image_id": analysis["image_id"],
-            "dataset_name": "AGIQA-3K",
+            "dataset_name": (analysis.get("context") or {}).get("source_dataset", "AGIQA-3K"),
             "dataset_image_name": analysis["dataset_image_name"],
             "prompt": analysis["prompt"],
             "generator": analysis["generator"],
+            "category": analysis.get("style") or analysis.get("generator") or "Unknown",
             "agiqa3k_ground_truth": ground_truth(analysis),
+            "context": analysis["context"],
         },
         region=region_out(analysis["image_id"], region).model_dump(),
         perturbation={
@@ -785,6 +971,7 @@ def module_4_handoff(batch_id: str):
         },
         candidates=candidate_payload,
         human_preferences=preferences,
+        pairwise_preferences=pairwise_preferences,
         human_summary={
             "participant_count": len(preferences),
             "average_rating_by_candidate": average_rating,
@@ -792,3 +979,121 @@ def module_4_handoff(batch_id: str):
         },
     )
 
+
+
+# -------------------------- Module 4 ---------------------------------
+
+
+def _agreement_for_batch(batch_id: str) -> dict:
+    handoff = module_4_handoff(batch_id)
+    try:
+        return analyze_batch_handoff(handoff.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get(
+    f"{settings.api_prefix}/module4/batches/{{batch_id}}/analysis",
+    response_model=BatchAgreementOut,
+)
+def module_4_batch_analysis(batch_id: str):
+    return _agreement_for_batch(batch_id)
+
+
+@app.get(
+    f"{settings.api_prefix}/module4/dashboard",
+    response_model=Module4DashboardOut,
+)
+def module_4_dashboard():
+    analyses = []
+    for batch_id in get_analyzable_batch_ids():
+        try:
+            analyses.append(_agreement_for_batch(batch_id))
+        except HTTPException:
+            continue
+    return summarize_dashboard(analyses)
+
+
+@app.get(f"{settings.api_prefix}/module4/batches/{{batch_id}}/report.csv")
+def module_4_batch_csv(batch_id: str):
+    analysis = _agreement_for_batch(batch_id)
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow([
+        "batch_id",
+        "candidate",
+        "source_type",
+        "severity",
+        "model_score",
+        "human_mean_rating",
+        "human_mean_ci95_lower",
+        "human_mean_ci95_upper",
+        "absolute_score_gap",
+        "substantial_disagreement",
+        "model_delta_from_original",
+        "human_delta_from_original",
+        "model_rank",
+        "human_rank",
+        "preference_count",
+        "preference_share",
+    ])
+    for row in analysis["candidates"]:
+        ci = row.get("human_mean_ci_95") or {}
+        writer.writerow([
+            analysis["batch_id"],
+            row["label"],
+            row["source_type"],
+            row.get("severity") or "",
+            row["model_score"],
+            row["human_mean_rating"],
+            ci.get("lower", ""),
+            ci.get("upper", ""),
+            row["absolute_score_gap"],
+            row.get("substantial_disagreement", False),
+            row.get("model_delta_from_original", ""),
+            row.get("human_delta_from_original", ""),
+            row["model_rank"],
+            row["human_rank"],
+            row["preference_count"],
+            row["preference_share"],
+        ])
+    filename = f'module4-{batch_id}.csv'
+    return Response(
+        content=buffer.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get(f"{settings.api_prefix}/module4/dashboard/report.csv")
+def module_4_dashboard_csv():
+    analyses = []
+    for batch_id in get_analyzable_batch_ids():
+        try:
+            analyses.append(_agreement_for_batch(batch_id))
+        except HTTPException:
+            continue
+    dashboard = summarize_dashboard(analyses)
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow([
+        "batch_id", "dataset_image_name", "perturbation", "region_label",
+        "participant_count", "top_choice_agreement", "directional_agreement_rate",
+        "disagreement_rate", "pearson_r", "spearman_rho", "mae", "rmse",
+        "mean_absolute_score_gap", "model_severity_response_slope",
+        "human_severity_response_slope", "error_count", "warning_count"
+    ])
+    for row in dashboard.get("batches", []):
+        writer.writerow([
+            row.get("batch_id"), row.get("dataset_image_name"), row.get("perturbation"),
+            row.get("region_label"), row.get("participant_count"), row.get("top_choice_agreement"),
+            row.get("directional_agreement_rate"), row.get("disagreement_rate"),
+            row.get("pearson_r"), row.get("spearman_rho"), row.get("mae"), row.get("rmse"),
+            row.get("mean_absolute_score_gap"), row.get("model_severity_response_slope"),
+            row.get("human_severity_response_slope"), row.get("error_count"), row.get("warning_count")
+        ])
+    return Response(
+        content=buffer.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="module4-project-dashboard.csv"'},
+    )

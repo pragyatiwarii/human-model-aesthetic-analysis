@@ -165,7 +165,7 @@ def _hue_shift(image: Image.Image, degrees: float) -> Image.Image:
     hue_delta = int(round((degrees / 360.0) * 255.0))
     hue = hsv[..., 0].astype(np.int16)
     hsv[..., 0] = ((hue + hue_delta) % 256).astype(np.uint8)
-    return Image.fromarray(hsv, "HSV").convert("RGB")
+    return Image.frombytes("HSV", image.size, hsv.tobytes()).convert("RGB")
 
 
 def _pixelate(image: Image.Image, scale: float) -> Image.Image:
@@ -205,7 +205,7 @@ def _structural_distortion(
         )
 
     arr[y1:y2, x1:x2] = crop
-    return Image.fromarray(arr, "RGB")
+    return Image.fromarray(arr)
 
 
 def make_candidate(
@@ -243,8 +243,7 @@ def make_candidate(
         arr = np.asarray(original, dtype=np.float32)
         noise = rng.normal(0.0, params["sigma"], size=arr.shape)
         return Image.fromarray(
-            np.clip(arr + noise, 0, 255).astype(np.uint8),
-            "RGB",
+            np.clip(arr + noise, 0, 255).astype(np.uint8)
         )
 
     raise ValueError(f"Unsupported perturbation: {perturbation_type}")

@@ -6,3 +6,6 @@ numpy>=1.26,<3
 ultralytics>=8.3,<9
 pytest>=8,<9
 httpx>=0.27,<1
+transformers>=4.46,<6
+
+python-multipart>=0.0.9,<1

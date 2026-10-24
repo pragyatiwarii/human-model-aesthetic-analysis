@@ -18,6 +18,21 @@ export async function getDatasetStatus() {
   );
 }
 
+
+export async function analyzeUploadedImage({ file, prompt, generator = "custom-upload", category = "" }) {
+  const form = new FormData();
+  form.append("image", file);
+  form.append("prompt", prompt);
+  form.append("generator", generator || "custom-upload");
+  if (category) form.append("category", category);
+  return readJson(
+    await fetch(`${API_BASE}/api/v1/images/analyze-upload`, {
+      method: "POST",
+      body: form,
+    })
+  );
+}
+
 export async function getRecords({
   offset = 0,
   limit = 25,
@@ -135,4 +150,46 @@ export async function submitHumanPreference({
 
 export function module4HandoffUrl(batchId) {
   return `${API_BASE}/api/v1/module3/batches/${batchId}/handoff`;
+}
+
+export async function getModule4Analysis(batchId) {
+  return readJson(
+    await fetch(`${API_BASE}/api/v1/module4/batches/${batchId}/analysis`)
+  );
+}
+
+export async function getModule4Dashboard() {
+  return readJson(
+    await fetch(`${API_BASE}/api/v1/module4/dashboard`)
+  );
+}
+
+export function module4AnalysisUrl(batchId) {
+  return `${API_BASE}/api/v1/module4/batches/${batchId}/analysis`;
+}
+
+export function module4CsvUrl(batchId) {
+  return `${API_BASE}/api/v1/module4/batches/${batchId}/report.csv`;
+}
+
+export function module4ProjectCsvUrl() {
+  return `${API_BASE}/api/v1/module4/dashboard/report.csv`;
+}
+
+export async function submitPairwisePreference({
+  batchId,
+  participantCode,
+  responses,
+}) {
+  return readJson(
+    await fetch(`${API_BASE}/api/v1/human-preferences/pairwise`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        batch_id: batchId,
+        participant_code: participantCode,
+        responses,
+      }),
+    })
+  );
 }

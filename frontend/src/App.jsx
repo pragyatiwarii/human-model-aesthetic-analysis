@@ -18,12 +18,17 @@ import {
 import {
   absoluteUrl,
   generateCounterfactuals,
+  getAestheticModelStatus,
   getDatasetStatus,
   getPerturbations,
   getRecords,
   handoffUrl,
   module3HandoffUrl,
+  module4HandoffUrl,
   runModule1,
+  scoreAestheticBatch,
+  submitHumanPreference,
+  trainAestheticModel,
 } from "./api";
 
 const PAGE_SIZE = 25;
@@ -129,6 +134,60 @@ function VariantCard({ variant }) {
   );
 }
 
+
+function HumanCandidateCard({ candidate, label, rating, preferred, onRating, onPreferred, revealed, modelScore }) {
+  const imageUrl = candidate.source_type === "original"
+    ? candidate.image_url
+    : candidate.counterfactual_url;
+  return (
+    <article className={["humanCandidate", preferred ? "preferred" : ""].join(" ")}>
+      <div className="candidateTop">
+        <div>
+          <span>Human study candidate</span>
+          <strong>{label}</strong>
+        </div>
+        <label className="bestChoice">
+          <input
+            type="radio"
+            name="preferredCandidate"
+            checked={preferred}
+            onChange={onPreferred}
+          />
+          Best
+        </label>
+      </div>
+      <img src={absoluteUrl(imageUrl)} alt={`Candidate ${label}`} />
+      <div className="ratingBlock">
+        <span>Aesthetic rating</span>
+        <div className="ratingButtons">
+          {[1, 2, 3, 4, 5].map((value) => (
+            <button
+              type="button"
+              className={rating === value ? "active" : ""}
+              onClick={() => onRating(value)}
+              key={value}
+            >
+              {value}
+            </button>
+          ))}
+        </div>
+      </div>
+      {revealed && (
+        <div className="revealedMeta">
+          <span>
+            {candidate.source_type === "original"
+              ? "Original"
+              : `Counterfactual · ${candidate.severity}`}
+          </span>
+          <strong>
+            Model score {modelScore == null ? "not scored" : Number(modelScore).toFixed(3)}
+          </strong>
+        </div>
+      )}
+    </article>
+  );
+}
+
 export default function App() {
   const [status, setStatus] = useState(null);
   const [records, setRecords] = useState([]);
@@ -145,6 +204,17 @@ export default function App() {
   const [perturbations, setPerturbations] = useState([]);
   const [perturbationType, setPerturbationType] = useState("blur");
   const [batch, setBatch] = useState(null);
+
+  const [modelStatus, setModelStatus] = useState(null);
+  const [modelScores, setModelScores] = useState(null);
+  const [participantCode, setParticipantCode] = useState("P001");
+  const [humanRatings, setHumanRatings] = useState({});
+  const [preferredCandidateId, setPreferredCandidateId] = useState("");
+  const [preferenceSubmitted, setPreferenceSubmitted] = useState(false);
+  const [blindStudy, setBlindStudy] = useState(false);
+  const [trainingModel, setTrainingModel] = useState(false);
+  const [scoringBatch, setScoringBatch] = useState(false);
+  const [submittingPreference, setSubmittingPreference] = useState(false);
 
   const [loadingList, setLoadingList] = useState(false);
   const [analysing, setAnalysing] = useState(false);
@@ -187,6 +257,11 @@ export default function App() {
         setAnalysis(null);
         setSelectedRegion(null);
         setBatch(null);
+        setModelScores(null);
+        setHumanRatings({});
+        setPreferredCandidateId("");
+        setPreferenceSubmitted(false);
+        setBlindStudy(false);
       }
     } catch (err) {
       setError(err.message);
@@ -198,6 +273,10 @@ export default function App() {
   useEffect(() => {
     getDatasetStatus()
       .then(setStatus)
+      .catch((err) => setError(err.message));
+
+    getAestheticModelStatus()
+      .then(setModelStatus)
       .catch((err) => setError(err.message));
 
     getPerturbations()
@@ -223,6 +302,11 @@ export default function App() {
     setAnalysis(null);
     setSelectedRegion(null);
     setBatch(null);
+    setModelScores(null);
+    setHumanRatings({});
+    setPreferredCandidateId("");
+    setPreferenceSubmitted(false);
+    setBlindStudy(false);
     setError("");
 
     try {
@@ -250,10 +334,95 @@ export default function App() {
         perturbationType,
       });
       setBatch(data);
+      setModelScores(null);
+      setHumanRatings({});
+      setPreferredCandidateId("");
+      setPreferenceSubmitted(false);
+      setBlindStudy(false);
     } catch (err) {
       setError(err.message);
     } finally {
       setGenerating(false);
+    }
+  }
+
+
+  async function trainModel() {
+    setTrainingModel(true);
+    setError("");
+    try {
+      const data = await trainAestheticModel();
+      setModelStatus(data);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setTrainingModel(false);
+    }
+  }
+
+  async function scoreBatch() {
+    if (!batch) return;
+    setScoringBatch(true);
+    setError("");
+    try {
+      const data = await scoreAestheticBatch(batch.batch_id);
+      setModelScores(data);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setScoringBatch(false);
+    }
+  }
+
+  function nextParticipantCode(current) {
+    const value = (current || "").trim();
+    const match = value.match(/^(.*?)(\d+)$/);
+    if (!match) return "P002";
+
+    const [, prefix, digits] = match;
+    const nextNumber = String(Number(digits) + 1).padStart(digits.length, "0");
+    return `${prefix}${nextNumber}`;
+  }
+
+  function startNextParticipant() {
+    setParticipantCode((current) => nextParticipantCode(current));
+    setHumanRatings({});
+    setPreferredCandidateId("");
+    setPreferenceSubmitted(false);
+    setBlindStudy(true);
+    setError("");
+  }
+
+  async function submitPreference() {
+    if (!batch) return;
+    const candidates = module3Candidates;
+    if (!participantCode.trim()) {
+      setError("Enter a participant code before submitting.");
+      return;
+    }
+    if (candidates.some((candidate) => !humanRatings[candidate.candidate_id])) {
+      setError("Rate every candidate from 1 to 5 before submitting.");
+      return;
+    }
+    if (!preferredCandidateId) {
+      setError("Choose the single best candidate before submitting.");
+      return;
+    }
+    setSubmittingPreference(true);
+    setError("");
+    try {
+      await submitHumanPreference({
+        batchId: batch.batch_id,
+        participantCode: participantCode.trim(),
+        ratings: humanRatings,
+        preferredCandidateId,
+      });
+      setPreferenceSubmitted(true);
+      setBlindStudy(false);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSubmittingPreference(false);
     }
   }
 
@@ -282,12 +451,43 @@ export default function App() {
     return "No reliable semantic object detected.";
   }, [analysis]);
 
+
+  const module3Candidates = useMemo(() => {
+    if (!batch) return [];
+    const original = {
+      candidate_id: `original:${batch.original_image_id}`,
+      source_type: "original",
+      severity: null,
+      image_url: batch.original_image_url,
+    };
+    const variants = batch.variants.map((variant) => ({
+      ...variant,
+      candidate_id: variant.counterfactual_id,
+      source_type: "counterfactual",
+    }));
+    const all = [original, ...variants];
+    // Stable anti-bias display order derived from the batch ID.
+    return all
+      .map((item) => ({
+        item,
+        key: `${batch.batch_id}:${item.candidate_id}`.split("").reduce((a, c) => ((a * 33) ^ c.charCodeAt(0)) >>> 0, 5381),
+      }))
+      .sort((a, b) => a.key - b.key)
+      .map(({ item }) => item);
+  }, [batch]);
+
+  const scoreByCandidate = useMemo(() => {
+    const map = {};
+    for (const item of modelScores?.candidates || []) map[item.candidate_id] = item.score;
+    return map;
+  }, [modelScores]);
+
   const selectedPerturbation = perturbations.find(
     (item) => item.key === perturbationType
   );
 
   return (
-    <main className="appShell">
+    <main className={blindStudy ? "appShell blindStudy" : "appShell"}>
       <header className="topbar">
         <div className="brand">
           <div className="logo">
@@ -296,30 +496,31 @@ export default function App() {
 
           <div>
             <h1>Aesthetic Lens</h1>
-            <p>AGIQA-3K · Modules 1 → 2</p>
+            <p>AGIQA-3K · Modules 1 → 3</p>
           </div>
         </div>
 
         <div className="modulePills">
           <div className="ownerPill">01 · Vennela</div>
-          <div className="ownerPill activeModule">02 · Sanyojita</div>
+          <div className="ownerPill">02 · Sanyojita</div>
+          <div className="ownerPill activeModule">03 · Muskan</div>
         </div>
       </header>
 
       <section className="hero">
         <div>
           <span className="eyebrow">
-            REGION → CONTROLLED CHANGE → COUNTERFACTUALS · 02/04
+            COUNTERFACTUALS → SCORE → HUMAN PREFERENCE · 03/04
           </span>
 
           <h2>
-            Modify <em>one selected region</em> while preserving everything else.
+            Score <em>what changed</em> and record what people actually prefer.
           </h2>
 
           <p>
-            Module 1 supplies a reliable editable region. Module 2 generates
-            subtle, moderate and strong counterfactual variants and records
-            the exact parameters used for Module 3.
+            Modules 1 and 2 prepare controlled original/counterfactual sets.
+            Module 3 gives every candidate a model aesthetic score and collects
+            blind human ratings for the final agreement analysis.
           </p>
         </div>
 
@@ -782,9 +983,153 @@ export default function App() {
         </section>
       )}
 
+
+      {batch && (
+        <section className="module3Section">
+          <div className="module2Intro module3Intro">
+            <div>
+              <span className="eyebrow">MODULE 3 · MUSKAN</span>
+              <h2>Aesthetic scoring + human preference collection</h2>
+              <p>
+                Score the original and all three counterfactuals with the same
+                cached AGIQA-trained model, then collect blind 1–5 human ratings
+                and one preferred candidate for Module 4 agreement analysis.
+              </p>
+            </div>
+            <Sparkles size={40} />
+          </div>
+
+          <div className="module3Controls">
+            <article className="panel modelPanel">
+              <div className="panelHeading">
+                <Database size={18} />
+                <div>
+                  <h3>Local aesthetic model</h3>
+                  <p>AGIQA-3K MOS-trained ridge regressor</p>
+                </div>
+              </div>
+              <div className="modelFacts">
+                <div><span>Status</span><strong>{modelStatus?.trained ? "trained ✓" : "not trained"}</strong></div>
+                <div><span>Version</span><strong>{modelStatus?.version || "agiqa-ridge-v1"}</strong></div>
+                {modelStatus?.validation_metrics && (
+                  <>
+                    <div><span>Validation MAE</span><strong>{Number(modelStatus.validation_metrics.mae).toFixed(3)}</strong></div>
+                    <div><span>Validation R²</span><strong>{Number(modelStatus.validation_metrics.r2).toFixed(3)}</strong></div>
+                  </>
+                )}
+              </div>
+              {!modelStatus?.trained ? (
+                <button type="button" className="primary" disabled={trainingModel} onClick={trainModel}>
+                  {trainingModel ? <LoaderCircle className="spin" size={18} /> : <Sparkles size={18} />}
+                  {trainingModel ? "Training from AGIQA-3K…" : "Train aesthetic model"}
+                </button>
+              ) : (
+                <button type="button" className="primary" disabled={scoringBatch} onClick={scoreBatch}>
+                  {scoringBatch ? <LoaderCircle className="spin" size={18} /> : <CheckCircle2 size={18} />}
+                  {scoringBatch ? "Scoring four candidates…" : "Score original + 3 counterfactuals"}
+                </button>
+              )}
+              <p className="methodNote">
+                The model is project-specific and interpretable. It learns AGIQA-3K
+                quality MOS from deterministic visual features and is cached after training.
+              </p>
+            </article>
+
+            <article className="panel humanPanel">
+              <div className="panelHeading">
+                <ShieldCheck size={18} />
+                <div>
+                  <h3>Human preference study</h3>
+                  <p>Blind scoring before identities/model scores are revealed</p>
+                </div>
+              </div>
+              <label className="fieldLabel" htmlFor="participantCode">Participant code</label>
+              <input
+                id="participantCode"
+                className="participantInput"
+                value={participantCode}
+                onChange={(event) => setParticipantCode(event.target.value)}
+                disabled={preferenceSubmitted}
+                placeholder="P001"
+              />
+              {!preferenceSubmitted ? (
+                <button type="button" className="secondaryStudyButton" onClick={() => setBlindStudy(true)}>
+                  Open blind participant view
+                </button>
+              ) : (
+                <button type="button" className="secondaryStudyButton" onClick={startNextParticipant}>
+                  Start next participant
+                </button>
+              )}
+              <p className="methodNote">
+                Ask the participant to rate every candidate from 1 (poor) to 5
+                (excellent) and mark exactly one as Best. Candidate identities are
+                hidden until submission to reduce bias.
+              </p>
+            </article>
+          </div>
+
+          <div className="humanCandidateGrid">
+            {module3Candidates.map((candidate, index) => (
+              <HumanCandidateCard
+                key={candidate.candidate_id}
+                candidate={candidate}
+                label={String.fromCharCode(65 + index)}
+                rating={humanRatings[candidate.candidate_id] || 0}
+                preferred={preferredCandidateId === candidate.candidate_id}
+                onRating={(value) => !preferenceSubmitted && setHumanRatings((current) => ({ ...current, [candidate.candidate_id]: value }))}
+                onPreferred={() => !preferenceSubmitted && setPreferredCandidateId(candidate.candidate_id)}
+                revealed={preferenceSubmitted}
+                modelScore={scoreByCandidate[candidate.candidate_id]}
+              />
+            ))}
+          </div>
+
+          <div className="module3SubmitRow">
+            <button
+              type="button"
+              className="primary"
+              disabled={submittingPreference || preferenceSubmitted}
+              onClick={submitPreference}
+            >
+              {submittingPreference ? <LoaderCircle className="spin" size={18} /> : <ShieldCheck size={18} />}
+              {preferenceSubmitted ? "Human preference saved ✓" : "Submit human preference"}
+            </button>
+            {!modelScores && modelStatus?.trained && (
+              <span>Score the batch to prepare the Module 4 model side.</span>
+            )}
+          </div>
+
+          {preferenceSubmitted && modelScores && (
+            <article className="panel module3Handoff">
+              <div className="panelHeading">
+                <CheckCircle2 size={18} />
+                <div>
+                  <h3>Module 4 handoff ready</h3>
+                  <p>Model scores + human ratings/preferences + experiment metadata</p>
+                </div>
+              </div>
+              <div className="modelPreference">
+                <span>Model-preferred candidate</span>
+                <strong>{modelScores.model_preferred_candidate_id}</strong>
+              </div>
+              <a
+                className="handoffButton"
+                href={module4HandoffUrl(batch.batch_id)}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Open complete Module 4 handoff JSON
+              </a>
+            </article>
+          )}
+        </section>
+      )}
+
       <footer>
         <span>Module 1 · Vennela ✓</span>
-        <strong>Module 2 · Sanyojita · controlled counterfactuals</strong>
+        <span>Module 2 · Sanyojita ✓</span>
+        <strong>Module 3 · Muskan · scoring + human preference</strong>
       </footer>
     </main>
   );

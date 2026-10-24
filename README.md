@@ -1,84 +1,106 @@
-# Human–Model Aesthetic Agreement Analysis
+# Human-Model Aesthetic Agreement Analysis
 
-## Modules 1 → 2 integrated build
+## Modules 1 -> 3 integrated build
 
-- **Module 1 — Vennela Laxmi Puli:** AGIQA-3K input, metadata, confidence-filtered YOLO segmentation, and safe `full_image` fallback.
-- **Module 2 — Sanyojita Priyadarshani Singh:** controlled region-specific counterfactual generation and Module 3 handoff.
+- **Module 1 - Vennela Laxmi Puli:** AGIQA-3K input, metadata, confidence-filtered YOLO segmentation, safe `full_image` fallback.
+- **Module 2 - Sanyojita Priyadarshani Singh:** controlled region-specific counterfactual generation with subtle/moderate/strong variants and exact outside-region preservation.
+- **Module 3 - Muskan Dubey:** model aesthetic scoring plus blind human aesthetic ratings/preferences and a Module 4 analysis handoff.
 
-Module 1 remains conceptually frozen at the `v1.4-module-1-vennela` boundary. Module 2 consumes that output rather than replacing its responsibility.
+Module 1 remains frozen at `v1.4-module-1-vennela`. Module 2 remains frozen at `v2.0-module-2-sanyojita`.
 
-## What Module 2 does
-
-Module 2 takes a Module 1 `image_id` and selected `region_id`, applies one controlled perturbation, and produces three counterfactuals:
-
-```text
-Module 1 image + selected region
-        ↓
-choose one perturbation
-        ↓
-subtle  |  moderate  |  strong
-        ↓
-lossless PNG counterfactuals
-        ↓
-outside-region isolation validation
-        ↓
-Module 3 handoff JSON
-```
-
-Supported perturbations:
-
-- brightness reduction
-- contrast reduction
-- saturation reduction
-- Gaussian blur
-- Gaussian noise
-- over-sharpening
-- colour / hue shift
-- pixelation
-- structural distortion
-
-Each perturbation has fixed, explicit severity parameters returned in the API response. Gaussian noise also stores its deterministic seed.
-
-## Scientific isolation rule
-
-Counterfactual outputs are saved as **PNG**, not JPEG. JPEG recompression can alter pixels outside the intended edit region even if the image operation itself was masked.
-
-For every generated variant, Module 2 reopens the persisted PNG and validates:
+## Module 3 workflow
 
 ```text
-outside_region_max_abs_diff == 0
+Module 2 batch
+    |
+    +-- original
+    +-- subtle
+    +-- moderate
+    +-- strong
+            |
+            v
+AGIQA-trained local aesthetic regressor
+            |
+            +--> model score for all 4 candidates
+            |
+            v
+blind human participant view
+            |
+            +--> 1-5 rating for every candidate
+            +--> one preferred candidate
+            |
+            v
+Module 4 handoff
 ```
 
-If that invariant fails, the variant is rejected.
+## Why the Module 3 scorer is local
 
-The response also records:
+The default scorer is deliberately reproducible and does not require downloading a large third-party foundation model at demo time. It trains a small ridge-regression model from the project's own AGIQA-3K `mos_quality` values and deterministic image features.
 
-- mask source (`segmentation_mask`, `polygon`, `bbox`, or `full_image`)
-- region pixel fraction
-- inside-region mean absolute difference
-- inside-region changed-pixel fraction
-- outside-region exact preservation result
+This should be described accurately in the report as a **project-specific AGIQA-trained aesthetic regressor**, not as a general-purpose aesthetic foundation model.
+
+The model reports held-out validation metrics so its limitations are visible.
+
+### Features used
+
+- luminance mean and spread,
+- saturation mean and spread,
+- colorfulness,
+- gradient energy,
+- edge density,
+- luminance entropy,
+- dark/bright clipping fractions,
+- centre-vs-global luminance balance,
+- horizontal symmetry.
+
+Default training limit:
+
+```text
+AESTHETIC_TRAIN_LIMIT=1000
+```
+
+Set it to `0` to use all locally available AGIQA-3K images.
+
+The trained model is cached at:
+
+```text
+backend/data/runtime/models/aesthetic_ridge_v1.json
+```
+
+Runtime files are excluded by `.gitignore`.
+
+## Human preference design
+
+A participant judges four candidates from one Module 2 experiment:
+
+- original,
+- subtle,
+- moderate,
+- strong.
+
+For every candidate the participant gives a 1-5 aesthetic rating and also chooses one overall Best candidate.
+
+The UI includes a **blind participant view**. Before submission it hides:
+
+- AGIQA MOS values,
+- original/counterfactual identity,
+- severity identity,
+- perturbation identity,
+- model scores.
+
+After submission, identities and model scores can be revealed for researcher inspection.
 
 ## Required local AGIQA-3K data
 
-The project does not redistribute AGIQA-3K. Keep the dataset locally at:
-
 ```text
 backend/data/agiqa3k/
-├── data.csv
-└── images/
-    ├── AttnGAN_normal_000.jpg
-    └── ...
+|-- data.csv
+`-- images/
+    |-- AttnGAN_normal_000.jpg
+    `-- ...
 ```
 
-If you already have the dataset in the Module 1 project, keep that folder in place when applying the Module 2 patch.
-
-## Recommended environment
-
-- Windows 10/11
-- Python 3.11
-- Node.js LTS
-- NVIDIA GPU optional; CPU is supported
+The repository does not redistribute the dataset.
 
 ## Backend
 
@@ -94,7 +116,7 @@ python -m pytest -q
 uvicorn app.main:app --reload
 ```
 
-If `.venv` does not exist yet:
+If `.venv` does not exist:
 
 ```powershell
 py -3.11 -m venv .venv
@@ -110,20 +132,9 @@ Health check:
 http://127.0.0.1:8000/health
 ```
 
-Expected Module 2 health fields include:
+Module 3 health information includes the model training status.
 
-```json
-{
-  "status": "ok",
-  "module": 2,
-  "module_1_owner": "Vennela Laxmi Puli",
-  "module_2_owner": "Sanyojita Priyadarshani Singh",
-  "counterfactual_output": "lossless PNG",
-  "perturbation_count": 9
-}
-```
-
-API docs:
+API documentation:
 
 ```text
 http://127.0.0.1:8000/docs
@@ -131,7 +142,7 @@ http://127.0.0.1:8000/docs
 
 ## Frontend
 
-Open a second PowerShell terminal:
+Open a second PowerShell:
 
 ```powershell
 cd frontend
@@ -146,69 +157,66 @@ Open:
 http://127.0.0.1:5173
 ```
 
-## How to test Module 2
+## Module 3 API
 
-1. Select an AGIQA-3K sample.
-2. Click **Run Module 1**.
-3. Select an object region, or use the `full_image` fallback when no reliable object exists.
-4. In **Module 2 — Sanyojita**, choose a perturbation such as Gaussian blur.
-5. Click **Generate subtle · moderate · strong**.
-6. Verify three variants appear.
-7. Each variant should show `Outside region: unchanged ✓`.
-8. Open the Module 3 handoff JSON.
-
-For a detected object, only the selected region should change. For a Module 1 `full_image` fallback, the whole image is the valid edit region.
-
-## Module 2 API
-
-### List perturbations
+### Model status
 
 ```text
-GET /api/v1/perturbations
+GET /api/v1/aesthetic-model/status
 ```
 
-### Generate counterfactuals
+### Train/cache local aesthetic model
 
 ```text
-POST /api/v1/counterfactuals/generate
+POST /api/v1/aesthetic-model/train
 ```
 
-Example request:
+Body:
 
 ```json
-{
-  "image_id": "<module-1-image-id>",
-  "region_id": "<module-1-region-id>",
-  "perturbation_type": "blur",
-  "severities": ["subtle", "moderate", "strong"]
-}
+{"force": false}
 ```
 
-### Retrieve a generated batch
+### Score one Module 2 batch
 
 ```text
-GET /api/v1/counterfactuals/batches/{batch_id}
+POST /api/v1/aesthetic/batches/{batch_id}/score
 ```
 
-### Module 3 handoff
+Returns a model score for original + subtle + moderate + strong.
+
+### Save human preference
 
 ```text
-GET /api/v1/counterfactuals/batches/{batch_id}/handoff
+POST /api/v1/human-preferences
 ```
 
-The handoff contains the original AGIQA identity and human ground truth, the selected Module 1 region, exact perturbation metadata, all three counterfactual URLs, parameters, and isolation validation.
+The request contains participant code, one 1-5 rating per candidate and one preferred candidate.
 
-## Git checkpoint
+### Module 4 handoff
 
-After local testing succeeds:
+```text
+GET /api/v1/module3/batches/{batch_id}/handoff
+```
+
+The handoff is available after the batch has model scores and at least one human preference response.
+
+## Validation completed before packaging
+
+```text
+13 backend tests passed
+```
+
+The aesthetic model was also smoke-tested for train -> cache -> load -> score behavior.
+
+The package installer was not available reliably in the build sandbox, so the final Vite runtime check must be performed on the Windows laptop using `npm.cmd install` and `npm.cmd run dev` before GitHub push.
+
+## Git checkpoint after local validation
 
 ```powershell
-git status
 git add .
-git commit -m "feat(module-2): add controlled counterfactual generation"
-git tag v2.0-module-2-sanyojita
+git commit -m "feat(module-3): add aesthetic scoring and human preferences"
+git tag v3.0-module-3-muskan
 git push origin main
-git push origin v2.0-module-2-sanyojita
+git push origin v3.0-module-3-muskan
 ```
-
-Do not move the existing `v1.4-module-1-vennela` tag. That tag remains the frozen Module 1 checkpoint.

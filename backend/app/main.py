@@ -13,14 +13,22 @@ from PIL import Image
 
 from app.core.config import DATA_DIR, settings
 from app.db import (
+    get_aesthetic_scores,
     get_analysis,
     get_counterfactual_batch,
+    get_human_preferences,
     get_region,
     init_db,
+    save_aesthetic_scores,
     save_analysis,
     save_counterfactuals,
+    save_human_preference,
 )
 from app.schemas import (
+    AestheticBatchScoresOut,
+    AestheticModelStatusOut,
+    AestheticScoreOut,
+    AestheticTrainIn,
     AnalysisOut,
     CounterfactualBatchOut,
     CounterfactualGenerateIn,
@@ -28,12 +36,16 @@ from app.schemas import (
     DatasetListOut,
     DatasetRecordOut,
     HandoffOut,
+    HumanPreferenceIn,
+    HumanPreferenceOut,
     Module3HandoffOut,
+    Module4HandoffOut,
     PerturbationSpecOut,
     RegionOut,
 )
 from app.services.agiqa3k import get_record, list_records, status
 from app.services.context import build_context
+from app.services.aesthetic_scorer import load_model, model_status, score_image, train_model
 from app.services.counterfactual_engine import PERTURBATIONS, generate_variant, public_specs
 from app.services.image_utils import create_annotated_preview
 from app.services.region_detector import RegionDetector
@@ -47,10 +59,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title=settings.app_name,
-    version="2.0.0-module-2",
+    version="3.0.0-module-3",
     description=(
-        "Module 1 AGIQA-3K region intelligence plus Module 2 controlled "
-        "counterfactual generation for Sanyojita Priyadarshani Singh."
+        "Modules 1-2 plus Module 3 aesthetic scoring and human preference "
+        "collection for Muskan Dubey."
     ),
     lifespan=lifespan,
 )
@@ -200,15 +212,18 @@ def batch_out(batch_id: str) -> CounterfactualBatchOut:
 def health():
     return {
         "status": "ok",
-        "module": 2,
+        "module": 3,
         "module_1_owner": "Vennela Laxmi Puli",
         "module_2_owner": "Sanyojita Priyadarshani Singh",
+        "module_3_owner": "Muskan Dubey",
         "dataset": "AGIQA-3K",
         "caption_model": "not used",
         "detection_confidence": settings.detection_confidence,
         "ml_models_enabled": settings.enable_ml_models,
         "counterfactual_output": "lossless PNG",
         "perturbation_count": len(PERTURBATIONS),
+        "aesthetic_model": model_status(),
+        "human_preference_collection": True,
     }
 
 
@@ -550,3 +565,230 @@ def module_3_handoff(batch_id: str):
             for variant in batch.variants
         ],
     )
+
+# -------------------------- Module 3 ---------------------------------
+
+
+def _batch_candidates(batch_id: str) -> tuple[dict, dict, list[dict]]:
+    rows = get_counterfactual_batch(batch_id)
+    if not rows:
+        raise HTTPException(status_code=404, detail="Counterfactual batch not found.")
+
+    analysis = get_analysis(rows[0]["image_id"])
+    region = get_region(rows[0]["image_id"], rows[0]["region_id"])
+    if analysis is None or region is None:
+        raise HTTPException(status_code=409, detail="Module 2 batch references missing upstream data.")
+
+    candidates = [
+        {
+            "candidate_id": f'original:{analysis["image_id"]}',
+            "source_type": "original",
+            "severity": None,
+            "image_url": f'/media/runtime/uploads/{analysis["stored_filename"]}',
+            "image_path": settings.uploads_dir / analysis["stored_filename"],
+        }
+    ]
+    for row in rows:
+        candidates.append(
+            {
+                "candidate_id": row["counterfactual_id"],
+                "source_type": "counterfactual",
+                "severity": row["severity"],
+                "image_url": counterfactual_url(row["filename"]),
+                "image_path": settings.counterfactuals_dir / row["filename"],
+            }
+        )
+    return analysis, region, candidates
+
+
+@app.get(
+    f"{settings.api_prefix}/aesthetic-model/status",
+    response_model=AestheticModelStatusOut,
+)
+def aesthetic_model_status():
+    return model_status()
+
+
+@app.post(
+    f"{settings.api_prefix}/aesthetic-model/train",
+    response_model=AestheticModelStatusOut,
+)
+def train_aesthetic_model(payload: AestheticTrainIn):
+    try:
+        train_model(force=payload.force)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return model_status()
+
+
+@app.post(
+    f"{settings.api_prefix}/aesthetic/batches/{{batch_id}}/score",
+    response_model=AestheticBatchScoresOut,
+)
+def score_counterfactual_batch(batch_id: str):
+    model = load_model()
+    if model is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Aesthetic model is not trained. Train Module 3 first.",
+        )
+
+    _analysis, _region, candidates = _batch_candidates(batch_id)
+    rows: list[dict] = []
+    for candidate in candidates:
+        image_path = candidate["image_path"]
+        if not image_path.exists():
+            raise HTTPException(status_code=409, detail=f'Missing candidate image: {image_path.name}')
+        score, features = score_image(image_path, model)
+        rows.append(
+            {
+                "score_id": str(uuid4()),
+                "batch_id": batch_id,
+                "candidate_id": candidate["candidate_id"],
+                "source_type": candidate["source_type"],
+                "severity": candidate["severity"],
+                "image_url": candidate["image_url"],
+                "score": round(score, 6),
+                "model_version": model.version,
+                "features": features,
+            }
+        )
+
+    save_aesthetic_scores(rows)
+    preferred = max(rows, key=lambda row: row["score"])["candidate_id"]
+    return AestheticBatchScoresOut(
+        batch_id=batch_id,
+        model=model_status(),
+        candidates=[AestheticScoreOut(**row) for row in rows],
+        model_preferred_candidate_id=preferred,
+    )
+
+
+@app.get(
+    f"{settings.api_prefix}/aesthetic/batches/{{batch_id}}/scores",
+    response_model=AestheticBatchScoresOut,
+)
+def retrieve_batch_scores(batch_id: str):
+    rows = get_aesthetic_scores(batch_id)
+    if not rows:
+        raise HTTPException(status_code=404, detail="No aesthetic scores found for this batch.")
+    preferred = max(rows, key=lambda row: row["score"])["candidate_id"]
+    return AestheticBatchScoresOut(
+        batch_id=batch_id,
+        model=model_status(),
+        candidates=[AestheticScoreOut(**row) for row in rows],
+        model_preferred_candidate_id=preferred,
+    )
+
+
+@app.post(
+    f"{settings.api_prefix}/human-preferences",
+    response_model=HumanPreferenceOut,
+)
+def submit_human_preference(payload: HumanPreferenceIn):
+    _analysis, _region, candidates = _batch_candidates(payload.batch_id)
+    candidate_ids = {candidate["candidate_id"] for candidate in candidates}
+
+    if set(payload.ratings) != candidate_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide one 1-5 rating for every original/counterfactual candidate.",
+        )
+    invalid = [key for key, value in payload.ratings.items() if not 1 <= int(value) <= 5]
+    if invalid:
+        raise HTTPException(status_code=400, detail="All aesthetic ratings must be integers from 1 to 5.")
+    if payload.preferred_candidate_id not in candidate_ids:
+        raise HTTPException(status_code=400, detail="Preferred candidate is not part of this batch.")
+
+    row = {
+        "preference_id": str(uuid4()),
+        "batch_id": payload.batch_id,
+        "participant_code": payload.participant_code.strip(),
+        "ratings": {key: int(value) for key, value in payload.ratings.items()},
+        "preferred_candidate_id": payload.preferred_candidate_id,
+        "notes": payload.notes.strip() if payload.notes else None,
+    }
+    save_human_preference(row)
+    stored = get_human_preferences(payload.batch_id)[-1]
+    return HumanPreferenceOut(**stored)
+
+
+@app.get(
+    f"{settings.api_prefix}/human-preferences/batches/{{batch_id}}",
+    response_model=list[HumanPreferenceOut],
+)
+def retrieve_human_preferences(batch_id: str):
+    _batch_candidates(batch_id)
+    return [HumanPreferenceOut(**row) for row in get_human_preferences(batch_id)]
+
+
+@app.get(
+    f"{settings.api_prefix}/module3/batches/{{batch_id}}/handoff",
+    response_model=Module4HandoffOut,
+)
+def module_4_handoff(batch_id: str):
+    analysis, region, candidates = _batch_candidates(batch_id)
+    score_rows = get_aesthetic_scores(batch_id)
+    preferences = get_human_preferences(batch_id)
+
+    if not score_rows:
+        raise HTTPException(status_code=409, detail="Score the batch with Module 3 before Module 4 handoff.")
+    if not preferences:
+        raise HTTPException(status_code=409, detail="Collect at least one human preference before Module 4 handoff.")
+
+    score_by_id = {row["candidate_id"]: row for row in score_rows}
+    candidate_payload = []
+    for candidate in candidates:
+        score = score_by_id.get(candidate["candidate_id"])
+        candidate_payload.append(
+            {
+                "candidate_id": candidate["candidate_id"],
+                "source_type": candidate["source_type"],
+                "severity": candidate["severity"],
+                "image_url": candidate["image_url"],
+                "model_aesthetic_score": score["score"] if score else None,
+                "model_version": score["model_version"] if score else None,
+            }
+        )
+
+    average_rating: dict[str, float] = {}
+    preferred_count: dict[str, int] = {candidate["candidate_id"]: 0 for candidate in candidates}
+    for candidate in candidates:
+        values = [p["ratings"][candidate["candidate_id"]] for p in preferences]
+        average_rating[candidate["candidate_id"]] = round(sum(values) / len(values), 4)
+    for preference in preferences:
+        preferred_count[preference["preferred_candidate_id"]] += 1
+
+    first_batch_row = get_counterfactual_batch(batch_id)[0]
+    spec = PERTURBATIONS[first_batch_row["perturbation_type"]]
+    model_preferred = max(score_rows, key=lambda row: row["score"])["candidate_id"]
+
+    return Module4HandoffOut(
+        batch_id=batch_id,
+        original={
+            "image_id": analysis["image_id"],
+            "dataset_name": "AGIQA-3K",
+            "dataset_image_name": analysis["dataset_image_name"],
+            "prompt": analysis["prompt"],
+            "generator": analysis["generator"],
+            "agiqa3k_ground_truth": ground_truth(analysis),
+        },
+        region=region_out(analysis["image_id"], region).model_dump(),
+        perturbation={
+            "type": first_batch_row["perturbation_type"],
+            "label": spec["label"],
+            "description": spec["description"],
+        },
+        model={
+            **model_status(),
+            "model_preferred_candidate_id": model_preferred,
+        },
+        candidates=candidate_payload,
+        human_preferences=preferences,
+        human_summary={
+            "participant_count": len(preferences),
+            "average_rating_by_candidate": average_rating,
+            "preferred_count_by_candidate": preferred_count,
+        },
+    )
+

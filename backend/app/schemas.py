@@ -132,3 +132,70 @@ class Module3HandoffOut(BaseModel):
     region: dict[str, Any]
     perturbation: dict[str, Any]
     counterfactuals: list[dict[str, Any]]
+
+
+class AestheticModelStatusOut(BaseModel):
+    trained: bool
+    version: str
+    model_path: str
+    training_limit: int
+    training_samples: int | None = None
+    validation_samples: int | None = None
+    source_images_used: int | None = None
+    validation_metrics: dict[str, float] | None = None
+    target: str | None = None
+    notes: str | None = None
+
+
+class AestheticTrainIn(BaseModel):
+    force: bool = False
+
+
+class AestheticScoreOut(BaseModel):
+    score_id: str
+    batch_id: str
+    candidate_id: str
+    source_type: Literal["original", "counterfactual"]
+    severity: Severity | None = None
+    image_url: str
+    score: float
+    model_version: str
+    features: dict[str, float]
+
+
+class AestheticBatchScoresOut(BaseModel):
+    schema_version: str = "3.0-aesthetic-scores"
+    batch_id: str
+    model: dict[str, Any]
+    candidates: list[AestheticScoreOut]
+    model_preferred_candidate_id: str
+
+
+class HumanPreferenceIn(BaseModel):
+    batch_id: str
+    participant_code: str = Field(min_length=1, max_length=50)
+    ratings: dict[str, int]
+    preferred_candidate_id: str
+    notes: str | None = Field(default=None, max_length=300)
+
+
+class HumanPreferenceOut(BaseModel):
+    preference_id: str
+    batch_id: str
+    participant_code: str
+    ratings: dict[str, int]
+    preferred_candidate_id: str
+    notes: str | None = None
+    created_at: str | None = None
+
+
+class Module4HandoffOut(BaseModel):
+    schema_version: str = "3.0-module4-handoff"
+    batch_id: str
+    original: dict[str, Any]
+    region: dict[str, Any]
+    perturbation: dict[str, Any]
+    model: dict[str, Any]
+    candidates: list[dict[str, Any]]
+    human_preferences: list[dict[str, Any]]
+    human_summary: dict[str, Any]

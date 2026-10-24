@@ -63,6 +63,35 @@ ON counterfactuals(batch_id);
 
 CREATE INDEX IF NOT EXISTS idx_counterfactual_image
 ON counterfactuals(image_id);
+
+CREATE TABLE IF NOT EXISTS aesthetic_scores (
+    score_id TEXT PRIMARY KEY,
+    batch_id TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    severity TEXT,
+    image_url TEXT NOT NULL,
+    score REAL NOT NULL,
+    model_version TEXT NOT NULL,
+    features_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_aesthetic_batch_candidate_model
+ON aesthetic_scores(batch_id, candidate_id, model_version);
+
+CREATE TABLE IF NOT EXISTS human_preferences (
+    preference_id TEXT PRIMARY KEY,
+    batch_id TEXT NOT NULL,
+    participant_code TEXT NOT NULL,
+    ratings_json TEXT NOT NULL,
+    preferred_candidate_id TEXT NOT NULL,
+    notes TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_human_preferences_batch
+ON human_preferences(batch_id);
 """
 
 
@@ -306,6 +335,116 @@ def get_counterfactual_batch(batch_id: str) -> list[dict[str, Any]]:
             "filename": row["filename"],
             "parameters": json.loads(row["parameters_json"]),
             "validation": json.loads(row["validation_json"]),
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
+
+
+def save_aesthetic_scores(rows: list[dict[str, Any]]) -> None:
+    created_at = datetime.now(timezone.utc).isoformat()
+    if not rows:
+        return
+    batch_id = rows[0]["batch_id"]
+    model_version = rows[0]["model_version"]
+    with connection() as conn:
+        conn.execute(
+            "DELETE FROM aesthetic_scores WHERE batch_id = ? AND model_version = ?",
+            (batch_id, model_version),
+        )
+        conn.executemany(
+            """
+            INSERT INTO aesthetic_scores (
+                score_id, batch_id, candidate_id, source_type, severity,
+                image_url, score, model_version, features_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    row["score_id"],
+                    row["batch_id"],
+                    row["candidate_id"],
+                    row["source_type"],
+                    row.get("severity"),
+                    row["image_url"],
+                    row["score"],
+                    row["model_version"],
+                    json.dumps(row["features"]),
+                    created_at,
+                )
+                for row in rows
+            ],
+        )
+
+
+def get_aesthetic_scores(batch_id: str) -> list[dict[str, Any]]:
+    with connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM aesthetic_scores
+            WHERE batch_id = ?
+            ORDER BY CASE source_type WHEN 'original' THEN 0 ELSE 1 END,
+                     CASE severity WHEN 'subtle' THEN 1 WHEN 'moderate' THEN 2 WHEN 'strong' THEN 3 ELSE 4 END
+            """,
+            (batch_id,),
+        ).fetchall()
+    return [
+        {
+            "score_id": row["score_id"],
+            "batch_id": row["batch_id"],
+            "candidate_id": row["candidate_id"],
+            "source_type": row["source_type"],
+            "severity": row["severity"],
+            "image_url": row["image_url"],
+            "score": row["score"],
+            "model_version": row["model_version"],
+            "features": json.loads(row["features_json"]),
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
+
+
+def save_human_preference(row: dict[str, Any]) -> None:
+    created_at = datetime.now(timezone.utc).isoformat()
+    with connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO human_preferences (
+                preference_id, batch_id, participant_code, ratings_json,
+                preferred_candidate_id, notes, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["preference_id"],
+                row["batch_id"],
+                row["participant_code"],
+                json.dumps(row["ratings"]),
+                row["preferred_candidate_id"],
+                row.get("notes"),
+                created_at,
+            ),
+        )
+
+
+def get_human_preferences(batch_id: str) -> list[dict[str, Any]]:
+    with connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM human_preferences
+            WHERE batch_id = ?
+            ORDER BY created_at
+            """,
+            (batch_id,),
+        ).fetchall()
+    return [
+        {
+            "preference_id": row["preference_id"],
+            "batch_id": row["batch_id"],
+            "participant_code": row["participant_code"],
+            "ratings": json.loads(row["ratings_json"]),
+            "preferred_candidate_id": row["preferred_candidate_id"],
+            "notes": row["notes"],
             "created_at": row["created_at"],
         }
         for row in rows

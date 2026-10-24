@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     annotated_dir: Path = RUNTIME_DIR / "annotated"
     regions_dir: Path = RUNTIME_DIR / "regions"
     counterfactuals_dir: Path = RUNTIME_DIR / "counterfactuals"
+    aesthetic_model_path: Path = RUNTIME_DIR / "models" / "aesthetic_ridge_v1.json"
+
+    aesthetic_train_limit: int = 1000
+    aesthetic_ridge_lambda: float = 3.0
 
     # Extend the clean v1.4 Module 1 database so existing image/region IDs remain valid.
     db_path: Path = RUNTIME_DIR / "module1_v14.db"
@@ -45,5 +49,6 @@ for directory in (
     settings.annotated_dir,
     settings.regions_dir,
     settings.counterfactuals_dir,
+    settings.aesthetic_model_path.parent,
 ):
     directory.mkdir(parents=True, exist_ok=True)
